@@ -806,6 +806,16 @@ collectd_LDADD += "-dlopen" openvpn.la
 collectd_DEPENDENCIES += openvpn.la
 endif
 
+if BUILD_PLUGIN_OPENVZ_GUEST_BANDWIDTH
+pkglib_LTLIBRARIES += openvz_guest_bandwidth.la
+openvz_guest_bandwidth_la_SOURCES = openvz_guest_bandwidth.c
+openvz_guest_bandwidth_la_CPPFLAGS = $(AM_CPPFLAGS) $(BUILD_WITH_LIBIPTC_CPPFLAGS)
+openvz_guest_bandwidth_la_LDFLAGS = -module -avoid-version $(BUILD_WITH_LIBIPTC_LDFLAGS)
+openvz_guest_bandwidth_la_LIBADD = -liptc -lip6tc
+collectd_LDADD += "-dlopen" openvz_guest_bandwidth.la
+collectd_DEPENDENCIES += openvz_guest_bandwidth.la
+endif
+
 if BUILD_PLUGIN_ORACLE
 pkglib_LTLIBRARIES += oracle.la
 oracle_la_SOURCES = oracle.c \

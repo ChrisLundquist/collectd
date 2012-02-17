@@ -4686,6 +4686,7 @@ AC_PLUGIN([hddtemp],     [yes],                [Query hddtempd])
 AC_PLUGIN([interface],   [$plugin_interface],  [Interface traffic statistics])
 AC_PLUGIN([ipmi],        [$plugin_ipmi],       [IPMI sensor statistics])
 AC_PLUGIN([iptables],    [$with_libiptc],      [IPTables rule counters])
+AC_PLUGIN([openvz_guest_bandwidth],    [$with_libiptc],      [Openvz Guest Bandwidth via IPTables])
 AC_PLUGIN([ipvs],        [$plugin_ipvs],       [IPVS connection statistics])
 AC_PLUGIN([irq],         [$plugin_irq],        [IRQ statistics])
 AC_PLUGIN([java],        [$with_java],         [Embed the Java Virtual Machine])
@@ -5047,6 +5048,7 @@ Configuration:
     olsrd . . . . . . . . $enable_olsrd
     onewire . . . . . . . $enable_onewire
     openvpn . . . . . . . $enable_openvpn
+    openvz_guest_bandwidth$enable_openvz_guest_bandwidth
     oracle  . . . . . . . $enable_oracle
     perl  . . . . . . . . $enable_perl
     pinba . . . . . . . . $enable_pinba
