@@ -29,11 +29,10 @@
 #include <libiptc/libip6tc.h> /* ip6_t* */
 #include "utils_avltree.h"    /* c_avl_* */
 
-static void build_tree(void); /* puts veids and their assigned IPs into a map */
+static int build_tree(void); /* puts veids and their assigned IPs into a map */
 static void update_tree();    /* sums transfer */
-  static void update_ip6();   /* updates ipv6 transfer */
-  static void update_ip4();   /* updates ipv4 transfer */
-static void print_data();     /* outputs our results */
+static void update_ip6();   /* updates ipv6 transfer */
+static void update_ip4();   /* updates ipv4 transfer */
 static void destroy_tree();   /* frees our memory */
 
 static int line_count(const char*);
@@ -41,7 +40,8 @@ static char* ipv4_mapped(char*);
 
 struct vps {
     int ctid;
-    char uuid[37];
+    char* uuid;
+    char* hostname;
     long tx_bytes;
     long rx_bytes;
 };
@@ -50,21 +50,55 @@ static c_avl_tree_t* lookup_table = NULL; /* maps IP to VPS since a VPS (often) 
 static struct vps *vpses = NULL;  /* the collection of all the vpses minus the host */
 static int vps_count = 0; /* the number of guests found in veinfo */
 
-static void ogb_submit()
+/* This is a little wonky because this one host must submit values 
+ * on behalf of several others
+ */
+static void ogb_vps_submit( struct vps* vps)
 {
-    print_data();
+    value_t transmit_value[1];
+    value_list_t transmit_value_list = VALUE_LIST_INIT;
+
+    value_t receive_value[1];
+    value_list_t receive_value_list = VALUE_LIST_INIT;
+
+    transmit_value[0].counter = vps->tx_bytes;
+    transmit_value_list.values = transmit_value;
+    transmit_value_list.values_len = STATIC_ARRAY_SIZE(transmit_value);
+
+    sstrncpy(transmit_value_list.host, "TestHost", sizeof(transmit_value_list.host));
+    sstrncpy(transmit_value_list.plugin, "openvz_guest_bandwidth", sizeof(transmit_value_list.plugin));
+    sstrncpy(transmit_value_list.plugin_instance, "tx", sizeof(transmit_value_list.plugin_instance));
+    sstrncpy(transmit_value_list.type, "counter", sizeof(transmit_value_list.type));
+
+    plugin_dispatch_values(&transmit_value_list);
+
+    receive_value[0].counter = vps->rx_bytes;
+    receive_value_list.values = receive_value;
+    receive_value_list.values_len = STATIC_ARRAY_SIZE(receive_value);
+
+    sstrncpy(receive_value_list.host, "TestHost", sizeof(receive_value_list.host));
+    sstrncpy(receive_value_list.plugin, "openvz_guest_bandwidth", sizeof(receive_value_list.plugin));
+    sstrncpy(receive_value_list.plugin_instance, "rx", sizeof(receive_value_list.plugin_instance));
+    sstrncpy(receive_value_list.type, "counter", sizeof(receive_value_list.type));
+
+    plugin_dispatch_values(&receive_value_list);
 }
 
 static int ogb_read(void)
 {
+    int i = 0;
+    int failed = 0;
     /* build our map of IP -> VPS */
-    build_tree();
+    failed = build_tree();
+    if(failed)
+        return failed;
     /* walk IP tables totalling transfer for the VPses we found */
     update_tree();
     /* Output the totals per VPS */
-    ogb_submit();
+    for(; i < vps_count; i++)
+        ogb_vps_submit(vpses + i);
     /* clean up */
-    destroy_tree();
+     destroy_tree();
     return 0;
 }
 
@@ -95,7 +129,7 @@ static void update_ip6() {
 
     /* ensure the chain exists so we don't segfault */
     if (! ip6tc_is_chain(chain, handle)) {
-        printf("ERROR: %s chain in %s table does NOT exists\n", chain, "filter");
+        ERROR ("ERROR: %s chain in %s table does NOT exists\n", chain, "filter");
         return;
     } 
 
@@ -137,7 +171,7 @@ static void update_ip4() {
     char src_address[INET6_ADDRSTRLEN], dst_address[INET6_ADDRSTRLEN];
     char src_mask[INET6_ADDRSTRLEN], dst_mask[INET6_ADDRSTRLEN];
     struct vps *vps = NULL;
-    void* key = NULL;
+    char* key = NULL;
     int status = 0;
 
     handle = iptc_init("filter");  
@@ -146,10 +180,9 @@ static void update_ip4() {
 
     /* ensure the chain exists so we don't segfault */
     if (! iptc_is_chain(chain, handle)) {
-        printf("ERROR: %s chain in %s table does NOT exists\n", chain, "filter");
+        ERROR ("ERROR: %s chain in %s table does NOT exists\n", chain, "filter");
         return;
     } 
-
 
     entry = iptc_first_rule(chain, handle);
     do {
@@ -163,24 +196,27 @@ static void update_ip4() {
         /* if the source address is in our map, then it was outbound */
         key = ipv4_mapped(src_address);
 
-        status = c_avl_get(lookup_table, key, (void *)&vps);
+        status = c_avl_get(lookup_table, (void*) key, (void *)&vps);
 
         if(status == 0){
             /* we only want exact subnet matches for source */
-            if(strcmp("255.255.255.255", src_mask) != 0)
+            if(strcmp("255.255.255.255", src_mask) != 0){
+                free(key);
                 continue;
+            }
             vps->tx_bytes += entry->counters.bcnt;
         } 
 
         /* if the destination address is in our map, then it was inbound*/
         key = ipv4_mapped(dst_address);
 
-        status = c_avl_get(lookup_table, key, (void *)&vps);
+        status = c_avl_get(lookup_table, (void *)key, (void *)&vps);
 
         /* make sure we got answer */
         if(status == 0){
             vps->rx_bytes += entry->counters.bcnt;
         }
+        free(key);
     } while ((entry = iptc_next_rule(entry, handle)) != NULL);
 
 }
@@ -190,29 +226,22 @@ static void update_tree(){
     update_ip6();
 }
 
-
-static void print_data(){
-    int i = 0;
-    for(;i < vps_count; i++){
-        printf("VPS %d\n",vpses[i].ctid);
-        printf("  tx_bytes: %ld\n",vpses[i].tx_bytes);
-        printf("  rx_bytes: %ld\n",vpses[i].rx_bytes);
-    }
-
-}
-
 static void destroy_tree() {
+    return;
     char* key = NULL;
-    void* value = NULL;
-    while(c_avl_pick(lookup_table,(void**) &key,(void**) &value) == 0){
+    struct vps *vps = NULL;
+    while(c_avl_pick(lookup_table,(void**) &key,(void**) &vps) == 0){
         if(key)
-            free(key);
-        value = NULL;
+             free(key);
+        vps = NULL;
     }
-    free(vpses);
+    if(vpses != NULL) {
+        free(vpses);
+    }
+    c_avl_destroy(lookup_table);
 }
 
-void
+int
 build_tree() {
     FILE *veinfo = NULL;
     char buffer[256];
@@ -221,8 +250,15 @@ build_tree() {
     struct vps *vps = NULL; /* The vps we are working on */
     int field = 0; /* which column of veinfo we are on */
     int line = 0; /* lets us know which line, thus which vps, we are working with */
-    void* key = NULL;
+    char* key = NULL;
     int status = 0; /* stores status of insert */
+
+    vps_count = line_count("/proc/vz/veinfo") - 1; /* don't count veid 0 since it is the host */
+
+    if(vps_count < 0){ /* error */
+        ERROR("openvz_guest_bandwidth: unable to count vpses in /proc/vz/veinfo");
+        return 2;
+    }
 
     /* We expect /proc/vz/veinfo to hold something like 
      * 377368     0    54        2607:f700:1:5c:25:90ff:fe49:6561   199.91.170.72   199.91.170.71
@@ -230,20 +266,23 @@ build_tree() {
      */
     veinfo = fopen("/proc/vz/veinfo", "r");
     if (veinfo == NULL) {
-        perror("fopen /proc/vz/veinfo");
-        exit(1);
+        ERROR("openvz_guest_bandwidth: fopen /proc/vz/veinfo");
+        return 1;
     }
 
-    vps_count = line_count("/proc/vz/veinfo") - 1; /* don't count veid 0 since it is the host */
     /* printf("Found %d VPSes\n", vps_count); */
     vpses = malloc(vps_count * sizeof(struct vps));
+    if(vpses == NULL){
+        ERROR("openvz_guest_bandwidth: failed to malloc building tree\n");
+        return 3;
+    }
 
     /* now we are sure it is worth building a tree */
     lookup_table = c_avl_create ((int (*) (const void *, const void *)) strcmp);
 
     if(lookup_table == NULL) {
-        perror("c_avl_create failed");
-        exit(-2);
+        ERROR("openvz_guest_bandwidth: c_avl_create failed");
+        return 4;
     }
 
     while (fgets(buffer, sizeof(buffer), veinfo) != NULL) {
@@ -254,6 +293,9 @@ build_tree() {
                 case 0: /* VEID */
                     vps = vpses + line;
                     vps->ctid = atol(token);
+                    vps->hostname = NULL;
+                    /* sstrncpy(vps->hostname, "Test Fixme", sizeof(vps->hostname)); */
+                    vps->uuid = NULL;
                     line++;
                     break;
                 case 1: /* Class */
@@ -261,7 +303,6 @@ build_tree() {
                     /* Ignore */
                     break;
                 default: /* additional fields are IPs */
-                    /* TODO free all the keys we allocate here when we destroy our tree*/
                     key = ipv4_mapped(token);
 
                     /* Insert the record and check for success */
@@ -275,10 +316,12 @@ build_tree() {
             token = strtok_r(NULL, " \t\n", &tok_pos);
         } /* for fields */
     } /* while(fgets) */
-
-    /* printf("lookup table has size of %d\n", c_avl_size(lookup_table)); */
-
-    fclose(veinfo);
+    
+    if(veinfo){
+        /* fclose(veinfo); */
+        veinfo = NULL;
+    }
+    return 0;
 } /* build_tree() */
 
 /* Turns an IPv4 address in ddd.ddd.ddd.ddd to a mapped IPv6 address
@@ -300,6 +343,8 @@ static char *ipv4_mapped(char* addr) {
 
     inet_ntop(AF_INET6, &ip, address_str, sizeof(address_str));
 
+    /* returns a copy that must be freed later */    
+    /* we can access it as the key in our lookup_table */
     return strndup (address_str,INET6_ADDRSTRLEN);
 }
 
@@ -311,8 +356,8 @@ static int line_count(const char* filename) {
 
     file = fopen(filename, "r");
 
-    if(!file) {
-        perror(filename);
+    if(file == NULL) {
+        ERROR("openvz_guest_bandwidth: unable to line_count file\n");
         return -1;
     }
 
