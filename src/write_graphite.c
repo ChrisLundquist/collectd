@@ -85,6 +85,7 @@ struct wg_callback
     char     escape_char;
 
     _Bool    store_rates;
+    _Bool    separate_instances;
     _Bool    always_append_ds;
 
     char     send_buf[WG_SEND_BUF_SIZE];
@@ -410,14 +411,18 @@ static int wg_format_name (char *ret, int ret_len,
             sizeof (n_type_instance), cb->escape_char);
 
     if (n_plugin_instance[0] != '\0')
-        ssnprintf (tmp_plugin, sizeof (tmp_plugin), "%s-%s",
-            n_plugin, n_plugin_instance);
+        ssnprintf (tmp_plugin, sizeof (tmp_plugin), "%s%c%s",
+            n_plugin,
+            cb->separate_instances ? '.' : '-',
+            n_plugin_instance);
     else
         sstrncpy (tmp_plugin, n_plugin, sizeof (tmp_plugin));
 
     if (n_type_instance[0] != '\0')
-        ssnprintf (tmp_type, sizeof (tmp_type), "%s-%s",
-            n_type, n_type_instance);
+        ssnprintf (tmp_type, sizeof (tmp_type), "%s%c%s",
+            n_type,
+            cb->separate_instances ? '.' : '-',
+            n_type_instance);
     else
         sstrncpy (tmp_type, n_type, sizeof (tmp_type));
 
@@ -616,6 +621,7 @@ static int wg_config_carbon (oconfig_item_t *ci)
     cb->prefix = NULL;
     cb->postfix = NULL;
     cb->escape_char = WG_DEFAULT_ESCAPE;
+    cb->store_rates = 1;
 
     pthread_mutex_init (&cb->send_lock, /* attr = */ NULL);
 
@@ -633,6 +639,8 @@ static int wg_config_carbon (oconfig_item_t *ci)
             cf_util_get_string (child, &cb->postfix);
         else if (strcasecmp ("StoreRates", child->key) == 0)
             cf_util_get_boolean (child, &cb->store_rates);
+        else if (strcasecmp ("SeparateInstances", child->key) == 0)
+            cf_util_get_boolean (child, &cb->separate_instances);
         else if (strcasecmp ("AlwaysAppendDS", child->key) == 0)
             cf_util_get_boolean (child, &cb->always_append_ds);
         else if (strcasecmp ("EscapeCharacter", child->key) == 0)

@@ -483,6 +483,7 @@ Synopsis:
 
  <Plugin "bind">
    URL "http://localhost:8053/"
+   ParseTime       false
    OpCodes         true
    QTypes          true
  
@@ -509,35 +510,44 @@ The bind plugin accepts the following configuration options:
 URL from which to retrieve the XML data. If not specified,
 C<http://localhost:8053/> will be used.
 
-=item B<OpCodes> I<true>|I<false>
+=item B<ParseTime> B<true>|B<false>
+
+When set to B<true>, the time provided by BIND will be parsed and used to
+dispatch the values. When set to B<false>, the local time source is queried.
+
+This setting is set to B<true> by default for backwards compatibility; setting
+this to B<false> is I<recommended> to avoid problems with timezones and
+localization.
+
+=item B<OpCodes> B<true>|B<false>
 
 When enabled, statistics about the I<"OpCodes">, for example the number of
 C<QUERY> packets, are collected.
 
 Default: Enabled.
 
-=item B<QTypes> I<true>|I<false>
+=item B<QTypes> B<true>|B<false>
 
 When enabled, the number of I<incoming> queries by query types (for example
 C<A>, C<MX>, C<AAAA>) is collected.
 
 Default: Enabled.
 
-=item B<ServerStats> I<true>|I<false>
+=item B<ServerStats> B<true>|B<false>
 
 Collect global server statistics, such as requests received over IPv4 and IPv6,
 successful queries, and failed updates.
 
 Default: Enabled.
 
-=item B<ZoneMaintStats> I<true>|I<false>
+=item B<ZoneMaintStats> B<true>|B<false>
 
 Collect zone maintenance statistics, mostly information about notifications
 (zone updates) and zone transfers.
 
 Default: Enabled.
 
-=item B<ResolverStats> I<true>|I<false>
+=item B<ResolverStats> B<true>|B<false>
 
 Collect resolver statistics, i.E<nbsp>e. statistics about outgoing requests
 (e.E<nbsp>g. queries over IPv4, lame servers). Since the global resolver
@@ -566,21 +576,21 @@ configured, no detailed view statistics will be collected.
 
 =over 4
 
-=item B<QTypes> I<true>|I<false>
+=item B<QTypes> B<true>|B<false>
 
 If enabled, the number of I<outgoing> queries by query type (e.E<nbsp>g. C<A>,
 C<MX>) is collected.
 
 Default: Enabled.
 
-=item B<ResolverStats> I<true>|I<false>
+=item B<ResolverStats> B<true>|B<false>
 
 Collect resolver statistics, i.E<nbsp>e. statistics about outgoing requests
 (e.E<nbsp>g. queries over IPv4, lame servers).
 
 Default: Enabled.
 
-=item B<CacheRRSets> I<true>|I<false>
+=item B<CacheRRSets> B<true>|B<false>
 
 If enabled, the number of entries (I<"RR sets">) in the view's cache by query
 type is collected. Negative entries (queries which resulted in an error, for
@@ -2786,7 +2796,18 @@ operating systems.
 =item B<MaxPacketSize> I<1024-65535>
 
 Set the maximum size for datagrams received over the network. Packets larger
-than this will be truncated. Defaults to 1452E<nbsp>bytes.
+than this will be truncated. Defaults to 1452E<nbsp>bytes, which is the maximum
+payload size that can be transmitted in one Ethernet frame using IPv6E<nbsp>/
+UDP.
+
+On the server side, this limit should be set to the largest value used on
+I<any> client. Likewise, the value on the client must not be larger than the
+value on the server, or data will be lost.
+
+B<Compatibility:> Versions prior to I<versionE<nbsp>4.8> used a fixed sized
+buffer of 1024E<nbsp>bytes. Versions I<4.8>, I<4.9> and I<4.10> used a default
+value of 1024E<nbsp>bytes to avoid problems when sending data to an older
+server.
 
 =item B<Forward> I<true|false>
 
@@ -4803,9 +4824,16 @@ underscore (C<_>).
 
 =item B<StoreRates> B<false>|B<true>
 
-If set to B<true>, convert counter values to rates. If set to B<false> (the
-default) counter values are stored as is, i.E<nbsp>e. as an increasing integer
+If set to B<true> (the default), convert counter values to rates. If set to
+B<false> counter values are stored as is, i.E<nbsp>e. as an increasing integer
 number.
+
+=item B<SeparateInstances> B<false>|B<true>
+
+If set to B<true>, the plugin instance and type instance will be in their own
+path component, for example C<host.cpu.0.cpu.idle>. If set to B<false> (the
+default), the plugin and plugin instance (and likewise the type and type
+instance) are put into once component, for example C<host.cpu-0.cpu-idle>.
 
 =item B<AlwaysAppendDS> B<false>|B<true>
 
