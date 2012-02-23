@@ -31,6 +31,14 @@
 #include <libiptc/libip6tc.h> /* ip6_t* */
 #include "utils_avltree.h"    /* c_avl_* */
 
+struct vps {
+    int ctid; /* TODO check OpenVZ source for CTID type */
+    char uuid[37]; /* string repesentiation of UUID is 36 characters */
+    uint64_t tx_bytes;
+    uint64_t rx_bytes;
+    int ip_count;
+};
+
 static int build_tree(void);
 static void update_ip4();
 static void update_ip6();
@@ -49,13 +57,6 @@ static const char *config_keys[] = {
 };
 static int config_keys_count = STATIC_ARRAY_SIZE (config_keys);
 
-struct vps {
-    int ctid; /* TODO check OpenVZ source for CTID type */
-    char uuid[37]; /* string repesentiation of UUID is 36 characters */
-    uint64_t tx_bytes;
-    uint64_t rx_bytes;
-    int ip_count;
-};
 
 static char *vps_uuid_path = NULL; /* The path within the OpenVZ guest to a file that contains the guests UUID i.e. /etc/hostuuid */
 static c_avl_tree_t *ip_lookup_table = NULL; /* maps IP to VPS since a VPS (often) has many IPs */
@@ -66,34 +67,22 @@ static c_avl_tree_t *vps_lookup_table = NULL; /* maps IP to VPS since a VPS (oft
  */
 static void ogb_vps_submit( struct vps* vps)
 {
-    value_t transmit_value[1];
-    value_list_t transmit_value_list = VALUE_LIST_INIT;
+    value_t values[1];
+    value_list_t vl = VALUE_LIST_INIT;
 
-    value_t receive_value[1];
-    value_list_t receive_value_list = VALUE_LIST_INIT;
+    vl.values = values;
+    vl.values_len = STATIC_ARRAY_SIZE(values);
+    sstrncpy(vl.host, vps->uuid, sizeof(vl.host));
+    sstrncpy(vl.plugin, "bandwidth", sizeof(vl.plugin));
+    sstrncpy(vl.type, "ipt_bytes", sizeof(vl.type));
 
-    transmit_value[0].counter = vps->tx_bytes;
-    transmit_value_list.values = transmit_value;
-    transmit_value_list.values_len = STATIC_ARRAY_SIZE(transmit_value);
+    sstrncpy(vl.plugin_instance, "tx", sizeof(vl.plugin_instance));
+    values[0].derive = (derive_t)vps->tx_bytes;
+    plugin_dispatch_values(&vl);
 
-    /* TODO send the real hostname */
-    sstrncpy(transmit_value_list.host, vps->uuid, sizeof(transmit_value_list.host));
-    sstrncpy(transmit_value_list.plugin, "bandwidth", sizeof(transmit_value_list.plugin));
-    sstrncpy(transmit_value_list.plugin_instance, "tx", sizeof(transmit_value_list.plugin_instance));
-    sstrncpy(transmit_value_list.type, "counter", sizeof(transmit_value_list.type));
-
-    plugin_dispatch_values(&transmit_value_list);
-
-    receive_value[0].counter = vps->rx_bytes;
-    receive_value_list.values = receive_value;
-    receive_value_list.values_len = STATIC_ARRAY_SIZE(receive_value);
-
-    sstrncpy(receive_value_list.host, vps->uuid, sizeof(receive_value_list.host));
-    sstrncpy(receive_value_list.plugin, "bandwidth", sizeof(receive_value_list.plugin));
-    sstrncpy(receive_value_list.plugin_instance, "rx", sizeof(receive_value_list.plugin_instance));
-    sstrncpy(receive_value_list.type, "counter", sizeof(receive_value_list.type));
-
-    plugin_dispatch_values(&receive_value_list);
+    sstrncpy(vl.plugin_instance, "rx", sizeof(vl.plugin_instance));
+    values[0].derive = (derive_t)vps->rx_bytes;
+    plugin_dispatch_values(&vl);
 }
 
 static int ogb_read(void)
@@ -277,7 +266,7 @@ static int build_tree() {
             switch(field) {
                 case 0: /* VEID */
                     vps = malloc(sizeof(struct vps));
-                    if(vps == NULL){
+                    if (vps == NULL){
                         ERROR("openvz_guest_bandwidth: malloc failed\n");
                         return (-4);
                     }
@@ -287,6 +276,8 @@ static int build_tree() {
                     vps->ip_count = 0;
                     vps->tx_bytes = 0;
                     vps->rx_bytes = 0;
+                    if (vps->ctid > 0 ) /* 0 is the host and we want to skip */
+                        load_vps_uuid(vps);
                     break;
                 case 1: /* Class */
                 case 2: /* Num Processes */
@@ -301,10 +292,14 @@ static int build_tree() {
                         /* side effect assignment */
                     } else {
                         ERROR("openvz_guest_bandwidth: Could not parse %s\n", token);
-                        continue;
+                        continue; /* next ip */
                     }
 
                     key = malloc(sizeof(ip));
+                    if (key == NULL){
+                        ERROR("openvz_guest_bandwidth: malloc failed\n");
+                        return (-5);
+                    }
                     bcopy(&ip, key, sizeof(ip));
                     status = c_avl_insert(ip_lookup_table, key, vps);
 
@@ -327,10 +322,9 @@ static int build_tree() {
         /* free VPS if IP count is zero */
         if (vps != NULL && vps->ip_count == 0){
             free(vps);
-            continue;
+            continue; /* next line */
         }
 
-        load_vps_uuid(vps);
         status = c_avl_insert(vps_lookup_table, &vps->ctid, vps);
         if (status < 0) {
             ERROR ("openvz_guest_bandwidth: failed inserting\n");
@@ -406,7 +400,7 @@ static int load_vps_uuid(struct vps *vps) {
         return -1;
     }
 
-    uuid_file = fopen(buffer);
+    uuid_file = fopen(buffer,"r");
     if (uuid_file == NULL) {
         char errbuf[1024];
         ERROR ("fopen(%s) failed: %s\n", buffer,
@@ -432,9 +426,11 @@ static int load_vps_uuid(struct vps *vps) {
        }
        */
     len = snprintf(vps->uuid,sizeof(vps->uuid),buffer);
-    if (len >= sizeof(vps->uuid) - 1) {
+    if (len >= sizeof(buffer) - 1) {
         ERROR ("openvz_guest_bandwidth: contents of /vz/private/%d/%s is too long, truncated\n", vps->ctid, vps_uuid_path);
         return -1;
     }
     return 0;
 }
+/* vi:sw=4:ts=4:et:nu 
+*/
