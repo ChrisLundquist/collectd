@@ -50,6 +50,7 @@ static int in6_addr_cmp(const struct in6_addr *, const struct in6_addr *);
 static struct in_addr *ipv6_map(struct in6_addr *);
 static struct in6_addr *ipv6_mapped(const struct in_addr *, struct in6_addr *);
 
+static struct vps* init_vps(const char* token);
 static int load_vps_uuid(struct vps *);
 
 static const char *config_keys[] = {
@@ -57,10 +58,11 @@ static const char *config_keys[] = {
 };
 static int config_keys_count = STATIC_ARRAY_SIZE (config_keys);
 
-
 static char *vps_uuid_path = NULL; /* The path within the OpenVZ guest to a file that contains the guests UUID i.e. /etc/hostuuid */
 static c_avl_tree_t *ip_lookup_table = NULL; /* maps IP to VPS since a VPS (often) has many IPs */
 static c_avl_tree_t *vps_lookup_table = NULL; /* maps IP to VPS since a VPS (often) has many IPs */
+static struct ip6tc_handle *handle6 = NULL;
+static struct iptc_handle *handle = NULL;
 
 /* This is a little wonky because this one host must submit values
  * on behalf of several others
@@ -74,14 +76,14 @@ static void ogb_vps_submit( struct vps* vps)
     vl.values_len = STATIC_ARRAY_SIZE(values);
     sstrncpy(vl.host, vps->uuid, sizeof(vl.host));
     sstrncpy(vl.plugin, "bandwidth", sizeof(vl.plugin));
-    sstrncpy(vl.type, "ipt_bytes", sizeof(vl.type));
+    sstrncpy(vl.type, "counter", sizeof(vl.type));
 
     sstrncpy(vl.plugin_instance, "tx", sizeof(vl.plugin_instance));
-    values[0].derive = (derive_t)vps->tx_bytes;
+    values[0].counter = vps->tx_bytes;
     plugin_dispatch_values(&vl);
 
     sstrncpy(vl.plugin_instance, "rx", sizeof(vl.plugin_instance));
-    values[0].derive = (derive_t)vps->rx_bytes;
+    values[0].counter = vps->rx_bytes;
     plugin_dispatch_values(&vl);
 }
 
@@ -129,10 +131,23 @@ static int ogb_config(const char *key, const char *value) {
     }
 }
 
-void module_register (void)
-{
+static int ogb_init() {
+    handle6 = ip6tc_init("filter");
+    handle = iptc_init("filter");
+    return 0;
+}
+
+static int ogb_shutdown() {
+    ip6tc_free(handle6);
+    iptc_free(handle);
+    return 0;
+}
+
+void module_register (void) {
+    plugin_register_init("openvz_guest_bandwidth",ogb_init);
     plugin_register_read ("openvz_guest_bandwidth", ogb_read);
     plugin_register_config("openvz_guest_bandwidth", ogb_config, config_keys, config_keys_count);
+    plugin_register_shutdown("openvz_guest_bandwidth",ogb_shutdown);
 } /* void module_register */
 
 
@@ -142,7 +157,6 @@ void module_register (void)
  * of the IP addresses it has assigned.
  */
 static void update_ip6() {
-    struct ip6tc_handle *handle = NULL;
     ip6t_chainlabel chain;
     const struct ip6t_entry *entry = NULL;
     struct vps *vps = NULL;
@@ -150,11 +164,9 @@ static void update_ip6() {
 
     memset(&slash128, 0xff, sizeof(slash128));
 
-    handle = ip6tc_init("filter");
-
     strncpy(chain, "FORWARD", sizeof(chain));
 
-    entry = ip6tc_first_rule(chain, handle);
+    entry = ip6tc_first_rule(chain, handle6);
     do {
         if (IN6_IS_ADDR_UNSPECIFIED(&entry->ipv6.src)
                 && IN6_IS_ADDR_UNSPECIFIED(&entry->ipv6.smsk)
@@ -169,12 +181,10 @@ static void update_ip6() {
             /* Source address matches */
             vps->tx_bytes += entry->counters.bcnt;
         }
-    } while ((entry = ip6tc_next_rule(entry, handle)) != NULL);
-    ip6tc_free(handle);
+    } while ((entry = ip6tc_next_rule(entry, handle6)) != NULL);
 }
 
 static void update_ip4() {
-    struct iptc_handle *handle = NULL;
     ipt_chainlabel chain;
     const struct ipt_entry *entry = NULL;
     struct vps *vps = NULL;
@@ -204,7 +214,6 @@ static void update_ip4() {
             vps->tx_bytes += entry->counters.bcnt;
         }
     } while ((entry = iptc_next_rule(entry, handle)) != NULL);
-    iptc_free(handle);
 }
 
 static void destroy_tree() {
@@ -223,6 +232,24 @@ static void destroy_tree() {
     }
     c_avl_destroy(ip_lookup_table);
     c_avl_destroy(vps_lookup_table);
+}
+
+static struct vps* init_vps(const char* token) {
+    struct vps* vps = NULL;
+    vps = malloc(sizeof(struct vps));
+    if (vps == NULL){
+        ERROR("openvz_guest_bandwidth: malloc failed\n");
+        return NULL;
+    }
+    vps->ctid = atol(token);
+    /* Initialize VPS UUID to fallback value CTID: #### */
+    snprintf(vps->uuid, sizeof(vps->uuid), "CTID: %d", vps->ctid);
+    vps->ip_count = 0;
+    vps->tx_bytes = 0;
+    vps->rx_bytes = 0;
+    if (vps->ctid > 0 ) /* 0 is the host and we want to skip */
+        load_vps_uuid(vps);
+    return vps;
 }
 
 static int build_tree() {
@@ -265,19 +292,11 @@ static int build_tree() {
         for (field = 0; token != NULL; field++) {
             switch(field) {
                 case 0: /* VEID */
-                    vps = malloc(sizeof(struct vps));
+                    vps = init_vps(token);
                     if (vps == NULL){
                         ERROR("openvz_guest_bandwidth: malloc failed\n");
-                        return (-4);
+                        return -4;
                     }
-                    vps->ctid = atol(token);
-                    /* Initialize VPS UUID to fallback value CTID: #### */
-                    snprintf(vps->uuid, sizeof(vps->uuid), "CTID: %d", vps->ctid);
-                    vps->ip_count = 0;
-                    vps->tx_bytes = 0;
-                    vps->rx_bytes = 0;
-                    if (vps->ctid > 0 ) /* 0 is the host and we want to skip */
-                        load_vps_uuid(vps);
                     break;
                 case 1: /* Class */
                 case 2: /* Num Processes */
