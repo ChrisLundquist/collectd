@@ -69,21 +69,17 @@ static struct iptc_handle *handle = NULL;
  */
 static void ogb_vps_submit( struct vps* vps)
 {
-    value_t values[1];
+    value_t values[2];
     value_list_t vl = VALUE_LIST_INIT;
 
     vl.values = values;
     vl.values_len = STATIC_ARRAY_SIZE(values);
     sstrncpy(vl.host, vps->uuid, sizeof(vl.host));
     sstrncpy(vl.plugin, "bandwidth", sizeof(vl.plugin));
-    sstrncpy(vl.type, "counter", sizeof(vl.type));
-
-    sstrncpy(vl.plugin_instance, "tx", sizeof(vl.plugin_instance));
-    values[0].counter = vps->tx_bytes;
-    plugin_dispatch_values(&vl);
-
-    sstrncpy(vl.plugin_instance, "rx", sizeof(vl.plugin_instance));
+    sstrncpy(vl.type, "if_octets", sizeof(vl.type));
     values[0].counter = vps->rx_bytes;
+    values[1].counter = vps->tx_bytes;
+
     plugin_dispatch_values(&vl);
 }
 
