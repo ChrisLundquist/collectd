@@ -146,10 +146,13 @@ enum BEANCOUNTER_TYPE {
 /*
  * Global structure to store the values and submit them to collectd.
  */
-static struct {
+struct beancounter_s {
   char    resource[DATA_MAX_NAME_LEN];
   value_t values[BEANCOUNTER_TYPE_SIZE];
-} beancounter;
+};
+typedef struct beancounter_s beancounter_t;
+
+static beancounter_t beancounter;
 
 
 /*
@@ -187,7 +190,8 @@ static int beancounter_config (const char *key, const char *value) {
 static void beancounter_submit (void) {
   value_list_t vl = VALUE_LIST_INIT;
 
-  if (ignorelist_match (ignorelist, beancounter.resource) != 0) return;
+  if (ignorelist_match (ignorelist, beancounter.resource) != 0)
+     return;
 
   vl.values = beancounter.values;
   vl.values_len = STATIC_ARRAY_SIZE (beancounter.values);
@@ -204,9 +208,6 @@ static void beancounter_submit (void) {
  *
  */
 static void beancounter_scale (void) {
-  const gauge_t nan = (gauge_t)strtod("NAN", NULL);
-  const char pages[] = "pages";
-  const char size0[] = "size\000";
   size_t idx;
   int i;
 
@@ -215,17 +216,17 @@ static void beancounter_scale (void) {
    */
   for (i=HELD; i<=LIMIT; i++) {
     if (beancounter.values[i].gauge >= (gauge_t)LONG_MAX) {
-      beancounter.values[i].gauge = nan;
+      beancounter.values[i].gauge = NAN;
     }
   }
 
   /* Check if the resource name ends with "pages" */
-  idx = strlen (beancounter.resource) - strlen (pages);
+  idx = strlen (beancounter.resource) - strlen ("pages");
 
-  if ((idx >= 0) && (strcmp (&beancounter.resource[idx], pages) == 0)) {
+  if ((idx >= 0) && (strcmp (&beancounter.resource[idx], "pages") == 0)) {
 
     /* Overwrite "pages" with "size" */
-    memcpy(&beancounter.resource[idx], size0, sizeof(size0));
+    memcpy(&beancounter.resource[idx], "size\000", sizeof("size\000"));
 
     /* scale value according to the pagesize */
     for (i=HELD; i<=LIMIT; i++) {
@@ -308,7 +309,7 @@ static int beancounter_read (void) {
         /* Ignore first token if it starts with a digit, as that is the uid.
          * In this case continue to read the rest of the line.
          */
-        if (isdigit (token[0])) {
+        if (isdigit ((int) (token[0]))) {
           token_count = 0;
           continue;
         }
@@ -326,23 +327,23 @@ static int beancounter_read (void) {
         break;
 
       case 2:
-        beancounter.values[HELD].gauge = strtod (token, NULL);
+        beancounter.values[HELD].gauge = parse_value (token, &beancounter.values[HELD], DS_TYPE_GAUGE);
         break;
 
       case 3:
-        beancounter.values[MAXHELD].gauge = strtod (token, NULL);
+        beancounter.values[MAXHELD].gauge = parse_value (token, &beancounter.values[MAXHELD], DS_TYPE_GAUGE);
         break;
 
       case 4:
-        beancounter.values[BARRIER].gauge = strtod (token, NULL);
+        beancounter.values[BARRIER].gauge = parse_value (token, &beancounter.values[BARRIER], DS_TYPE_GAUGE);
         break;
 
       case 5:
-        beancounter.values[LIMIT].gauge = strtod (token, NULL);
+        beancounter.values[LIMIT].gauge = parse_value (token, &beancounter.values[LIMIT], DS_TYPE_GAUGE);
         break;
 
       case 6:
-        beancounter.values[FAILCNT].derive = strtoll (token, NULL, 10);
+        beancounter.values[FAILCNT].derive = parse_value (token, &beancounter.values[FAILCNT], DS_TYPE_DERIVE);
         break;
       }
     }
