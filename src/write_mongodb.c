@@ -41,12 +41,13 @@
 #else
 # define MONGO_USE_LONG_LONG_INT 1
 #endif
-#include <mongo.h>
+#include <mongoc.h>
 
-#if (MONGO_MAJOR == 0) && (MONGO_MINOR < 8)
-# define bson_alloc()    bson_create()
-# define bson_dealloc(b) bson_dispose(b)
-#endif
+// #if (MONGO_MAJOR == 0) && (MONGO_MINOR < 8)
+// # define bson_alloc()    bson_create()
+// # define bson_dealloc(b) bson_dispose(b)
+// #endif
+
 
 struct wm_node_s
 {
@@ -62,8 +63,9 @@ struct wm_node_s
   char *passwd;
 
   _Bool store_rates;
+  bool connected;
 
-  mongo conn[1];
+  mongoc_client_t *client;
   pthread_mutex_t lock;
 };
 typedef struct wm_node_s wm_node_t;
@@ -71,15 +73,15 @@ typedef struct wm_node_s wm_node_t;
 /*
  * Functions
  */
-static bson *wm_create_bson (const data_set_t *ds, /* {{{ */
+static bson_t *wm_create_bson (const data_set_t *ds, /* {{{ */
     const value_list_t *vl,
     _Bool store_rates)
 {
-  bson *ret;
+  bson_t *ret;
   gauge_t *rates;
   int i;
 
-  ret = bson_alloc (); /* matched by bson_dealloc() */
+  ret = bson_new(); /* matched by bson_free() */
   if (ret == NULL)
   {
     ERROR ("write_mongodb plugin: bson_create failed.");
@@ -100,15 +102,15 @@ static bson *wm_create_bson (const data_set_t *ds, /* {{{ */
     rates = NULL;
   }
 
-  bson_init (ret); /* matched by bson_destroy() */
-  bson_append_date (ret, "time", (bson_date_t) CDTIME_T_TO_MS (vl->time));
-  bson_append_string (ret, "host", vl->host);
-  bson_append_string (ret, "plugin", vl->plugin);
-  bson_append_string (ret, "plugin_instance", vl->plugin_instance);
-  bson_append_string (ret, "type", vl->type);
-  bson_append_string (ret, "type_instance", vl->type_instance);
+  // bson_init (ret); /* matched by bson_destroy() */
+  bson_append_date_time(ret, "time", sizeof(CDTIME_T_TO_MS (vl->time)), CDTIME_T_TO_MS (vl->time) );
+  BSON_APPEND_UTF8(ret, "host", vl->host);
+  BSON_APPEND_UTF8(ret, "plugin", vl->plugin);
+  BSON_APPEND_UTF8(ret, "plugin_instance", vl->plugin_instance);
+  BSON_APPEND_UTF8(ret, "type", vl->type);
+  BSON_APPEND_UTF8(ret, "type_instance", vl->type_instance);
 
-  bson_append_start_array (ret, "values"); /* {{{ */
+  bson_append_array_begin (ret, "values", -1, NULL); /* {{{ */
   for (i = 0; i < ds->ds_num; i++)
   {
     char key[16];
@@ -116,21 +118,21 @@ static bson *wm_create_bson (const data_set_t *ds, /* {{{ */
     ssnprintf (key, sizeof (key), "%i", i);
 
     if (ds->ds[i].type == DS_TYPE_GAUGE)
-      bson_append_double(ret, key, vl->values[i].gauge);
+      BSON_APPEND_DOUBLE(ret, key, vl->values[i].gauge);
     else if (store_rates)
-      bson_append_double(ret, key, (double) rates[i]);
+      BSON_APPEND_DOUBLE(ret, key, (double) rates[i]);
     else if (ds->ds[i].type == DS_TYPE_COUNTER)
-      bson_append_long(ret, key, vl->values[i].counter);
+      BSON_APPEND_INT64(ret, key,  vl->values[i].counter);
     else if (ds->ds[i].type == DS_TYPE_DERIVE)
-      bson_append_long(ret, key, vl->values[i].derive);
+      BSON_APPEND_INT64(ret, key, vl->values[i].derive);
     else if (ds->ds[i].type == DS_TYPE_ABSOLUTE)
-      bson_append_long(ret, key, vl->values[i].absolute);
+      BSON_APPEND_INT64(ret, key, vl->values[i].absolute);
     else
       assert (23 == 42);
   }
-  bson_append_finish_array (ret); /* }}} values */
+  bson_append_array_end(ret, NULL); /* }}} values */
 
-  bson_append_start_array (ret, "dstypes"); /* {{{ */
+  bson_append_array_begin (ret, "dstypes", -1, NULL); /* {{{ */
   for (i = 0; i < ds->ds_num; i++)
   {
     char key[16];
@@ -138,118 +140,111 @@ static bson *wm_create_bson (const data_set_t *ds, /* {{{ */
     ssnprintf (key, sizeof (key), "%i", i);
 
     if (store_rates)
-      bson_append_string (ret, key, "gauge");
+      BSON_APPEND_UTF8 (ret, key, "gauge");
     else
-      bson_append_string (ret, key, DS_TYPE_TO_STRING (ds->ds[i].type));
+      BSON_APPEND_UTF8 (ret, key, DS_TYPE_TO_STRING (ds->ds[i].type) );
   }
-  bson_append_finish_array (ret); /* }}} dstypes */
+  bson_append_array_end(ret, NULL); /* }}} dstypes */
 
-  bson_append_start_array (ret, "dsnames"); /* {{{ */
+  bson_append_array_begin (ret, "dsnames", -1, NULL); /* {{{ */
   for (i = 0; i < ds->ds_num; i++)
   {
     char key[16];
 
     ssnprintf (key, sizeof (key), "%i", i);
-    bson_append_string (ret, key, ds->ds[i].name);
+    BSON_APPEND_UTF8 (ret, key, ds->ds[i].name);
   }
-  bson_append_finish_array (ret); /* }}} dsnames */
+  bson_append_array_end (ret, NULL); /* }}} dsnames */
 
-  bson_finish (ret);
+  bson_append_document_end (ret, NULL);
 
   sfree (rates);
   return (ret);
 } /* }}} bson *wm_create_bson */
 
-static int wm_write (const data_set_t *ds, /* {{{ */
-    const value_list_t *vl,
-    user_data_t *ud)
-{
-  wm_node_t *node = ud->data;
-  char collection_name[512];
-  bson *bson_record;
-  int status;
-
-  ssnprintf (collection_name, sizeof (collection_name), "collectd.%s",
-      vl->plugin);
-
-  bson_record = wm_create_bson (ds, vl, node->store_rates);
-  if (bson_record == NULL)
-    return (ENOMEM);
-
-  pthread_mutex_lock (&node->lock);
-
-  if (!mongo_is_connected (node->conn))
+static int wm_initialize(wm_node_t *node) {
+  if (!node->connected)
   {
     INFO ("write_mongodb plugin: Connecting to [%s]:%i",
         (node->host != NULL) ? node->host : "localhost",
-        (node->port != 0) ? node->port : MONGO_DEFAULT_PORT);
-    status = mongo_connect (node->conn, node->host, node->port);
-    if (status != MONGO_OK) {
+        (node->port != 0) ? node->port : MONGOC_DEFAULT_PORT);
+    //status = mongoc_connect (node->client, node->host, node->port);
+    // TODO
+    node->client = mongoc_client_new ("mongodb://localhost:27017");
+    if (node->client) {
       ERROR ("write_mongodb plugin: Connecting to [%s]:%i failed.",
           (node->host != NULL) ? node->host : "localhost",
-          (node->port != 0) ? node->port : MONGO_DEFAULT_PORT);
-      mongo_destroy (node->conn);
+          (node->port != 0) ? node->port : MONGOC_DEFAULT_PORT);
+      mongoc_client_destroy (node->client);
+      node->connected = 0;
       pthread_mutex_unlock (&node->lock);
       return (-1);
     }
 
     if ((node->db != NULL) && (node->user != NULL) && (node->passwd != NULL))
     {
-      status = mongo_cmd_authenticate (node->conn,
-          node->db, node->user, node->passwd);
-      if (status != MONGO_OK)
+      // status = mongo_cmd_authenticate (node->client, node->db, node->user, node->passwd);
+      // TODO
+      node->client = mongoc_client_new ("mongodb://localhost:27017");
+      if (node->client)
       {
         ERROR ("write_mongodb plugin: Authenticating to [%s]%i for database "
             "\"%s\" as user \"%s\" failed.",
           (node->host != NULL) ? node->host : "localhost",
-          (node->port != 0) ? node->port : MONGO_DEFAULT_PORT,
+          (node->port != 0) ? node->port : MONGOC_DEFAULT_PORT,
           node->db, node->user);
-        mongo_destroy (node->conn);
+        mongoc_client_destroy (node->client);
+        node->connected = 0;
         pthread_mutex_unlock (&node->lock);
         return (-1);
       }
     }
-
+    /*
     if (node->timeout > 0) {
-      status = mongo_set_op_timeout (node->conn, node->timeout);
-      if (status != MONGO_OK) {
+      status = mongo_set_op_timeout (node->client, node->timeout);
+      if (status) {
         WARNING ("write_mongodb plugin: mongo_set_op_timeout(%i) failed: %s",
-            node->timeout, node->conn->errstr);
+            node->timeout, node->client->errstr);
       }
     }
+    */
   }
+  node->connected = 1;
+  return 0;
+}
 
-  /* Assert if the connection has been established */
-  assert (mongo_is_connected (node->conn));
+static int wm_write (const data_set_t *ds, /* {{{ */
+    const value_list_t *vl,
+    user_data_t *ud)
+{
+  wm_node_t *node = ud->data;
+  mongoc_collection_t *collection;
+  bson_t *bson_record;
+  bson_error_t error;
+  int status;
 
-  #if MONGO_MINOR >= 6
-    /* There was an API change in 0.6.0 as linked below */
-    /* https://github.com/mongodb/mongo-c-driver/blob/master/HISTORY.md */
-    status = mongo_insert (node->conn, collection_name, bson_record, NULL);
-  #else
-    status = mongo_insert (node->conn, collection_name, bson_record);
-  #endif
+  bson_record = wm_create_bson (ds, vl, node->store_rates);
+  if (bson_record == NULL)
+    return (ENOMEM);
 
-  if (status != MONGO_OK)
+  pthread_mutex_lock (&node->lock);
+  wm_initialize(node);
+
+  collection = mongoc_client_get_collection (node->client, "collectd", vl->plugin);
+  status = mongoc_collection_insert (collection, MONGOC_INSERT_NONE, bson_record, NULL, &error);
+
+  if (status)
   {
-    ERROR ( "write_mongodb plugin: error inserting record: %d", node->conn->err);
-    if (node->conn->err != MONGO_BSON_INVALID)
-      ERROR ("write_mongodb plugin: %s", node->conn->errstr);
-    else
-      ERROR ("write_mongodb plugin: Invalid BSON structure, error = %#x",
-          (unsigned int) bson_record->err);
-
-    /* Disconnect except on data errors. */
-    if ((node->conn->err != MONGO_BSON_INVALID)
-        && (node->conn->err != MONGO_BSON_NOT_FINISHED))
-      mongo_destroy (node->conn);
+    ERROR ( "write_mongodb plugin: error inserting record: %s", error.message);
+    mongoc_client_destroy (node->client);
+    node->connected = 0;
   }
 
   pthread_mutex_unlock (&node->lock);
 
   /* free our resource as not to leak memory */
-  bson_destroy (bson_record); /* matches bson_init() */
-  bson_dealloc (bson_record); /* matches bson_alloc() */
+  // bson_destroy (bson_record); /* matches bson_init() */
+  bson_free (bson_record); /* matches bson_new() */
 
   return (0);
 } /* }}} int wm_write */
@@ -261,8 +256,8 @@ static void wm_config_free (void *ptr) /* {{{ */
   if (node == NULL)
     return;
 
-  if (mongo_is_connected (node->conn))
-    mongo_destroy (node->conn);
+  mongoc_client_destroy (node->client);
+  node->connected = 0;
 
   sfree (node->host);
   sfree (node);
@@ -278,7 +273,7 @@ static int wm_config_node (oconfig_item_t *ci) /* {{{ */
   if (node == NULL)
     return (ENOMEM);
   memset (node, 0, sizeof (*node));
-  mongo_init (node->conn);
+  mongoc_init ();
   node->host = NULL;
   node->store_rates = 1;
   pthread_mutex_init (&node->lock, /* attr = */ NULL);
